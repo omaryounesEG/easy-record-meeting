@@ -20,7 +20,7 @@
 
 ```bash
 .venv\Scripts\python -m unittest discover -s tests -t .
-# Ran 63 tests ... OK
+# Ran 67 tests ... OK
 ```
 
 كل خطأ أدناه أُثبت بقراءة الكود أو بإعادة إنتاج مخبرية **وباختبار آلي يمنع عودته** — لم يُسجَّل خطأ نظري واحد.
