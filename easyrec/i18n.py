@@ -110,6 +110,14 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "ar": "إعادة توصيل الصوت… التسجيل مستمر",
         "en": "Reconnecting audio… recording continues",
     },
+    "notice.video_reconnect": {
+        "ar": "إعادة تشغيل تصوير الشاشة… التسجيل مستمر",
+        "en": "Restarting the screen capture… recording continues",
+    },
+    "notice.no_audio": {
+        "ar": "حُفظ مقطع بدون صوت — الصورة محفوظة",
+        "en": "A segment was saved without sound — the picture is kept",
+    },
     "monitor.idle_hint": {
         "ar": "اضغط «بدء التسجيل» للبدء",
         "en": "Press “Start recording” to begin",

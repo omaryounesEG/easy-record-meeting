@@ -7,7 +7,7 @@ Saip Consulting / صائب للاستشارات
 APP_NAME = "Easy Record"
 APP_NAME_FULL = "Easy Record Meeting"
 BILINGUAL_NAME = "مسجل الاجتماعات الذكي | Easy Record Meeting"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 VERSION_TAG = f"v{APP_VERSION}"
 PUBLISHER = "SAIP Consulting | صائب للاستشارات"
 GITHUB_OWNER = "omaryounesEG"

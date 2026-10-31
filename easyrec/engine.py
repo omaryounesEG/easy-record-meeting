@@ -19,6 +19,7 @@ Design notes
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,8 @@ CRITICAL_AFTER = 30.0                    # seconds of silence -> alarm
 MP3_BITRATE = 128
 AUDIO_STALL_SECONDS = 12.0                # device silence (after real sound) -> restart stream
 AUDIO_RECOVERIES = 3                      # stream restarts allowed per segment
+AUDIO_HARD_STALL = 20.0                   # no audio chunks at all -> roll a new segment
+VIDEO_HARD_STALL = 12.0                   # ffmpeg silent -> roll a new segment
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -122,6 +125,7 @@ class Snapshot:
     error: Optional[str] = None
     segments: int = 0
     notice: str = ""              # transient message ("audio stream restarted")
+    notice_key: str = ""          # i18n key for that message
 
     @property
     def is_active(self) -> bool:
@@ -129,6 +133,19 @@ class Snapshot:
 
 
 # --------------------------------------------------------------------- devices
+_INDEX_PREFIX = re.compile(r"\(\s*\d+\s*-\s*")
+
+
+def device_key(name: str) -> str:
+    """Comparison key for an endpoint name.
+
+    Windows appends a changing instance index ("Speakers (2- Logi USB Headset)")
+    and soundcard repeats it, so two enumerations of the same speaker can differ
+    by a single digit.  Stripping the index makes the comparison stable.
+    """
+    return _INDEX_PREFIX.sub("(", (name or "").strip().lower())
+
+
 def init_com() -> None:
     """soundcard talks to Media Foundation: every thread needs COM initialised."""
     try:
@@ -178,8 +195,14 @@ class Recorder:
         self._seg_stop: Optional[threading.Event] = None
         self._had_sound = False
         self._notice = ""
+        self._notice_key = "notice.audio_reconnect"
         self._notice_at = 0.0
         self._device_name = ""
+        self._audio_beat = 0.0            # last moment a chunk arrived
+        self._audio_token = None          # only the owner writes to the segment
+        self._video_progress = None
+        self._wd_stop = threading.Event()
+        self._wd_thread: Optional[threading.Thread] = None
         self._video: Optional[subprocess.Popen] = None
         self._segments: List[Dict[str, Any]] = []
         self._video_log: Optional[str] = None
@@ -232,6 +255,9 @@ class Recorder:
                 segments=max(self._segment_count, len(self._segments)),
                 notice=(self._notice
                         if self._notice and time.monotonic() - self._notice_at < 20 else ""),
+                notice_key=(self._notice_key
+                            if self._notice and time.monotonic() - self._notice_at < 20
+                            else ""),
             )
 
     def _progress_size(self, path: Optional[str]) -> int:
@@ -284,6 +310,7 @@ class Recorder:
             self._segment_count = 0
             self._had_sound = False
             self._notice = ""
+            self._notice_key = "notice.audio_reconnect"
             self._notice_at = 0.0
             self.beeps = 0
             self._status = "recording"
@@ -296,7 +323,80 @@ class Recorder:
                 self._error = str(exc)
             self._cleanup_segments()
             raise RecorderError(str(exc)) from exc
+        self._start_watchdog()
         return self._output
+
+    # ---------------------------------------------------------------- watchdog
+    def _start_watchdog(self) -> None:
+        self._wd_stop = threading.Event()
+        self._wd_thread = threading.Thread(target=self._watchdog,
+                                           args=(self._wd_stop,), name="easyrec-watchdog",
+                                           daemon=True)
+        self._wd_thread.start()
+
+    def _stop_watchdog(self) -> None:
+        self._wd_stop.set()
+        thread, self._wd_thread = self._wd_thread, None
+        if thread is not None:
+            thread.join(3.0)
+
+    def _video_alive(self) -> bool:
+        """True while ffmpeg is running and still writing progress."""
+        proc = self._video
+        if proc is None:
+            return False
+        try:
+            if proc.poll() is not None:
+                return False
+        except Exception:
+            return False
+        stamps = []
+        for path in (self._video_progress, getattr(self, "_video_target", None)):
+            if path:
+                try:
+                    stamps.append(os.path.getmtime(path))
+                except OSError:
+                    pass
+        if stamps and time.time() - max(stamps) > VIDEO_HARD_STALL:
+            return False          # alive but silent: it stopped writing
+        return True
+
+    def _watchdog(self, stop: threading.Event) -> None:
+        """Roll a fresh segment when the audio or the screen capture goes quiet.
+
+        A wedged WASAPI read never returns, so the writer thread cannot recover
+        by itself: the only safe move is to start a new segment and let the mux
+        step join the parts.  The same applies to a dead ffmpeg process.
+        """
+        while not stop.wait(1.0):
+            try:
+                if self._status != "recording":
+                    continue
+                now = time.monotonic()
+                age = now - self._audio_beat
+                if self._audio_beat and age > AUDIO_HARD_STALL:
+                    self._roll_segment(f"audio stream stalled for {age:.0f}s — continuing")
+                    continue
+                if self._mode == "video" and not self._video_alive():
+                    self._roll_segment("screen capture stopped — continuing")
+            except Exception:
+                continue
+
+    def _roll_segment(self, reason: str) -> None:
+        """Start a new audio+video segment without touching the elapsed clock."""
+        with self._lock:
+            if self._status != "recording":
+                return
+            key = "notice.video_reconnect" if "screen" in reason else "notice.audio_reconnect"
+            self._note(reason, key)
+        self._end_segment(soft=True)
+        device = self._fresh_device() or self._last_device
+        try:
+            self._begin_segment(device)
+        except Exception as exc:
+            with self._lock:
+                self._status = "error"
+                self._error = f"could not restart the recording stream: {exc}"
 
     # --------------------------------------------------------------- segments
     def _begin_segment(self, device) -> None:
@@ -309,21 +409,28 @@ class Recorder:
         }
         if self._mode == "video":
             self._spawn_video(segment["video"], segment["progress"])
+        self._video_progress = segment["progress"]
+        self._video_target = segment["video"]
         self._segments.append(segment)
         self._seg_stop = threading.Event()
+        self._audio_token = object()
+        self._audio_beat = time.monotonic()
         self._thread = threading.Thread(
-            target=self._write_loop, args=(device, self._mode, segment, self._seg_stop),
+            target=self._write_loop,
+            args=(device, self._mode, segment, self._seg_stop, self._audio_token),
             name=f"easyrec-writer-{index}", daemon=True)
         self._thread.start()
 
-    def _end_segment(self) -> None:
+    def _end_segment(self, soft: bool = False) -> None:
+        # revoke ownership first: a zombie reader must never touch this segment again
+        self._audio_token = None
         event = self._seg_stop
         if event is not None:
             event.set()
         thread = self._thread
         if thread is not None:
-            thread.join(8.0)
-            if thread.is_alive():
+            thread.join(2.0 if soft else 8.0)
+            if thread.is_alive() and not soft:
                 with self._lock:
                     self._error = self._error or "the audio writer did not stop in time"
         self._thread = None
@@ -380,13 +487,14 @@ class Recorder:
         return ""
 
     # ------------------------------------------------------------- writer loop
-    def _write_loop(self, device, mode: str, segment: Dict[str, str], stop: threading.Event) -> None:
+    def _write_loop(self, device, mode: str, segment: Dict[str, str],
+                    stop: threading.Event, token=None) -> None:
         init_com()
         try:
             if mode == "audio":
-                self._encode_mp3(device, stop)
+                self._encode_mp3(device, stop, token)
             else:
-                self._write_wav(device, segment["audio"], stop)
+                self._write_wav(device, segment["audio"], stop, token)
         except Exception as exc:
             with self._lock:
                 if self._status in ("recording", "paused"):
@@ -396,7 +504,34 @@ class Recorder:
             self._kill_video()
             stop.set()
 
-    def _pump_audio(self, device, on_chunk, stop: threading.Event) -> None:
+    def _reconnect_device(self):
+        """Find the same loopback endpoint again after a device glitch.
+
+        Ported from the NEW build: soundcard exposes loopback endpoints as
+        microphones, and the endpoint name carries a changing index prefix
+        ("Speakers (2- ...)"), so a fuzzy, loopback-only match is used.
+        """
+        name = self._device_name or ""
+        try:
+            import soundcard as sc
+
+            candidates = [m for m in sc.all_microphones(include_loopback=True)
+                          if getattr(m, "isloopback", False)]
+        except Exception:
+            return None
+        if not candidates:
+            return None
+        key = device_key(name)
+        for mic in candidates:                     # exact (index ignored)
+            if device_key(getattr(mic, "name", "")) == key:
+                return mic
+        for mic in candidates:                     # one name contains the other
+            mic_key = device_key(getattr(mic, "name", ""))
+            if key and (key in mic_key or mic_key in key):
+                return mic
+        return None
+
+    def _pump_audio(self, device, on_chunk, stop: threading.Event, token=None) -> None:
         """Read the loopback stream, restarting it when the endpoint goes dead.
 
         A USB or Bluetooth endpoint that sleeps keeps the WASAPI stream open but
@@ -420,6 +555,9 @@ class Recorder:
                         data = rec.record(numframes=CHUNK_FRAMES)
                         if data is None or len(data) == 0:
                             continue
+                        if token is not None and self._audio_token is not token:
+                            return              # segment was closed under us
+                        self._audio_beat = time.monotonic()
                         on_chunk(data)
                         level = self._track_level(data, np)
                         if level >= 1.0:
@@ -444,14 +582,18 @@ class Recorder:
                     raise RecorderError(
                         f"the audio device stopped responding ({exc})") from exc
                 self._note(f"reconnecting the audio stream ({attempts}/{AUDIO_RECOVERIES})")
+                replacement = self._reconnect_device()
+                if replacement is not None:
+                    device = replacement
                 stop.wait(0.6)
 
-    def _note(self, text: str) -> None:
+    def _note(self, text: str, key: str = "notice.audio_reconnect") -> None:
         with self._lock:
             self._notice = text
+            self._notice_key = key
             self._notice_at = time.monotonic()
 
-    def _encode_mp3(self, device, stop: threading.Event) -> None:
+    def _encode_mp3(self, device, stop: threading.Event, token=None) -> None:
         import lameenc
         import numpy as np
 
@@ -468,18 +610,18 @@ class Recorder:
             mp3.write(encoder.encode(int16.tobytes()))
 
         with open(tmp, "wb") as mp3:
-            self._pump_audio(device, on_chunk, stop)
+            self._pump_audio(device, on_chunk, stop, token)
             tail = encoder.flush()
             if tail:
                 mp3.write(tail)
         os.replace(tmp, self._output)
 
-    def _write_wav(self, device, path: str, stop: threading.Event) -> None:
+    def _write_wav(self, device, path: str, stop: threading.Event, token=None) -> None:
         import soundfile as sf
 
         with sf.SoundFile(path, mode="w", samplerate=SAMPLE_RATE,
                           channels=CHANNELS, format="WAV", subtype="PCM_16") as wav:
-            self._pump_audio(device, wav.write, stop)   # close() flushes -> join before mux
+            self._pump_audio(device, wav.write, stop, token)   # close() flushes -> join before mux
 
     def _track_level(self, data, np) -> float:
         rms = float(np.sqrt(np.mean(np.square(data))))
@@ -524,8 +666,9 @@ class Recorder:
         except Exception:
             return self._last_device
         if name:
+            key = device_key(name)
             for candidate in devices:
-                if getattr(candidate, "name", "") == name:
+                if device_key(getattr(candidate, "name", "")) == key:
                     return candidate
         # the endpoint disappeared (headset slept/unplugged): use the default output
         if devices:
@@ -559,6 +702,7 @@ class Recorder:
                 self._accumulated += time.monotonic() - self._period_start
             self._status = "finishing"
             self._level = 0.0
+        self._stop_watchdog()
         self._end_segment()          # joins the writer and kills ffmpeg, even after an error
 
         if self._mode == "video":
@@ -642,6 +786,10 @@ class Recorder:
                     "-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
         else:
             cmd += ["-an", "-c:v", "copy"]
+            with self._lock:
+                self._notice = "a segment was saved without sound"
+                self._notice_key = "notice.no_audio"
+                self._notice_at = time.monotonic()
         cmd += [part]
         try:
             done = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -708,6 +856,7 @@ class Recorder:
         """Abort without muxing (app closing mid-recording)."""
         with self._lock:
             self._status = "idle"
+        self._stop_watchdog()
         self._end_segment()
         self._cleanup_segments()
 

@@ -927,7 +927,8 @@ class EasyRecordApp:
             self.pause_btn.set_tone("neutral")
         self._sync_start_button()
         if snap.notice:
-            hint, colour = self.t("notice.audio_reconnect"), self.colors["warn"]
+            hint = self.t(snap.notice_key or "notice.audio_reconnect")
+            colour = self.colors["warn"]
         elif active:
             hint, colour = "", self.colors["text_faint"]
         else:

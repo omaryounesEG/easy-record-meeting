@@ -11,8 +11,9 @@ import urllib.request
 TOKEN = os.environ["GH_TOKEN_LOCAL"]
 API = "https://api.github.com/repos/omaryounesEG/easy-record-meeting"
 HERE = r"H:/Meeting_REC"
-ZIP = os.path.join(HERE, "dist", "EasyRecordMeeting-2.0.0-win64.zip")
-NOTES = os.path.join(HERE, "docs", "RELEASE_NOTES_v2.0.0.md")
+VERSION = os.environ.get("RELEASE_VERSION", "2.0.1")
+ZIP = os.path.join(HERE, "dist", f"EasyRecordMeeting-{VERSION}-win64.zip")
+NOTES = os.path.join(HERE, "docs", f"RELEASE_NOTES_v{VERSION}.md")
 
 
 def call(url: str, method: str = "GET", data: bytes | None = None,
@@ -37,7 +38,8 @@ def call(url: str, method: str = "GET", data: bytes | None = None,
 
 
 def main() -> None:
-    sha = open(os.path.join(HERE, "dist", "SHA256.txt"), encoding="utf-8").read().split()[0]
+    sha_file = os.path.join(HERE, "dist", "SHA256.txt" if VERSION == "2.0.0" else f"SHA256-{VERSION}.txt")
+    sha = open(sha_file, encoding="utf-8").read().split()[0]
     body = open(NOTES, encoding="utf-8").read()
     body = body.replace("**SHA-256** of the attached archive is listed in the release body below.",
                         f"**SHA-256:** `{sha}`")
@@ -46,14 +48,14 @@ def main() -> None:
              f"- SHA-256: `{sha}`\n")
 
     # reuse the release if it already exists
-    status, existing = call(f"{API}/releases/tags/v2.0.0")
+    status, existing = call(f"{API}/releases/tags/v{VERSION}")
     if status == 200:
         rel = existing
         print("release already exists:", rel["html_url"])
     else:
         payload = json.dumps({
-            "tag_name": "v2.0.0",
-            "name": "Easy Record Meeting 2.0.0 — مسجّل الاجتماعات الذكي",
+            "tag_name": f"v{VERSION}",
+            "name": f"Easy Record Meeting {VERSION} — مسجّل الاجتماعات الذكي",
             "body": body,
             "draft": False,
             "prerelease": False,
@@ -71,7 +73,7 @@ def main() -> None:
     print("uploading", round(os.path.getsize(ZIP) / 1048576, 1), "MB ...")
     with open(ZIP, "rb") as fh:
         blob = fh.read()
-    url = f"{upload_url}?name=EasyRecordMeeting-2.0.0-win64.zip"
+    url = f"{upload_url}?name=EasyRecordMeeting-{VERSION}-win64.zip"
     status, asset = call(url, "POST", blob, "application/zip")
     print("upload:", status, asset.get("name"), asset.get("size"), "bytes",
           asset.get("message", ""))

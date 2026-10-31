@@ -6,10 +6,10 @@
 <p align="center"><b>مسجّل الاجتماعات الذكي</b> · Smart meeting &amp; lecture recorder for Windows</p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-2.0.0-2B63E8">
+  <img alt="version" src="https://img.shields.io/badge/version-2.0.1-2B63E8">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0E9F6E">
   <img alt="python" src="https://img.shields.io/badge/python-3.11%2B-3776AB">
-  <img alt="tests" src="https://img.shields.io/badge/tests-67%20passing-0E9F6E">
+  <img alt="tests" src="https://img.shields.io/badge/tests-70%20passing-0E9F6E">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-5A6B85">
 </p>
 
@@ -42,6 +42,7 @@
 | 🎙️ تسجيل صوت النظام | يلتقط ما تسمعه من السماعة عبر SoundCard Loopback — لا ميكروفون خارجي ولا تشويش الغرفة |
 | 🔇 **إنذار انقطاع الصوت** | بعد 10 ثوانٍ صمت: تنبيه، وبعد 30 ثانية: وميض أحمر + نغمة، وزر كتم فوري |
 | 🔁 **إعادة توصيل تلقائي للصوت** | إذا نام منفذ السماعة (USB/Bluetooth) وأخذ يعطي صمتًا رقميًا، يُعاد فتح المنفذ تلقائيًا ويُعلمك — ولن تُترك بصورة بلا صوت |
+| 🛡️ **حرّاس (Watchdogs)** | تعليق قراءة الصوت أو موت ffmpeg لا ينهي التسجيل: يبدأ مقطع جديد فورًا ويكمل، والنتيجة ملف واحد متصل |
 | 🎥 فيديو + صوت | تسجيل الشاشة MP4 (H.264 + AAC) بنفس نقرة واحدة |
 | ✂️ قص فوري | Stream-copy داخل ffmpeg — قص ساعة في ثوانٍ |
 | ⏸️ إيقاف مؤقت نظيف | يُوقف الصوت والفيديو معًا ويجمعهما بعد ذلك، فلا يحدث انفصال بين الصوت والصورة |
@@ -128,7 +129,7 @@ build_exe.bat                 # بناء OMAR_REC.exe
 .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-67 اختبارًا: أخطاء مُصلحة، انقطاع الصوت وإعادة التوصيل، تعدد اللغات، تباين الألوان، المحرّك، الواجهة، الأداء.
+70 اختبارًا: أخطاء مُصلحة، انقطاع الصوت وإعادة التوصيل، تعدد اللغات، تباين الألوان، المحرّك، الواجهة، الأداء.
 
 ### كلمات مفتاحية
 
@@ -160,6 +161,7 @@ Meet, where the sound comes out of the machine.
 | 🎙️ System-audio capture | Loopback recording through SoundCard — no external mic, no room noise |
 | 🔇 **Silence alarm** | 10 s of silence → warning; 30 s → flashing red border + beep + one-click mute |
 | 🔁 **Automatic audio reconnect** | If a USB/Bluetooth endpoint sleeps and starts delivering digital silence, the stream is reopened and you are told — never a picture without sound |
+| 🛡️ **Watchdogs** | A wedged audio read or a dead ffmpeg starts a fresh segment instead of ending the call; the result is still one continuous file |
 | 🎥 Video + audio | Screen capture to MP4 (H.264 + AAC) in the same click |
 | ✂️ Instant trim | ffmpeg stream-copy: cutting an hour takes seconds |
 | ⏸️ Clean pause | Audio **and** video stop and are re-joined, so picture never drifts from sound |
@@ -226,7 +228,7 @@ easyrec/
   config.py              UTF-8, atomic settings persistence
 assets/fonts/            11 IBM Plex TTFs (OFL)
 assets/icon.ico|png      app + window icon
-tests/                   67 automated tests
+tests/                   70 automated tests
 tools/                   perf probe, engine probe, screenshot generator
 docs/                    user guide + screenshots
 reports/                 bug / performance / UX test reports
