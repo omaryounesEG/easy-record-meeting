@@ -1,0 +1,40 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ---- binaries: shipped through GitHub Releases, not the repo ----
+/OMAR_REC.exe
+/ffmpeg.exe
+*.exe
+!tools/*.exe
+
+# ---- PyInstaller ----
+build/
+dist/
+*.spec
+*.manifest
+
+# ---- local/runtime ----
+reports/.perf_cfg.json
+reports/probe_media/
+reports/shots/
+reports/build.log
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- never commit captured media or credentials ----
+*.mp3
+*.wav
+*.mp4
+*.mkv
+*.m4a
+*.env
+.env*
+secrets.*

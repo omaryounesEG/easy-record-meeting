@@ -1,0 +1,6 @@
+SoundCard>=0.4.6
+soundfile>=0.14.0
+lameenc>=1.8.4
+numpy>=2.0.0
+imageio-ffmpeg>=0.7.0
+pillow>=10.0.0

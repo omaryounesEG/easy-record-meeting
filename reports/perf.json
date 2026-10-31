@@ -1,0 +1,14 @@
+{
+  "startup_s": 1.685,
+  "tick_ms_avg": 0.69,
+  "tick_ms_p95": 1.91,
+  "tick_ms_max": 4.34,
+  "render_ms_avg": 0.17,
+  "render_ms_p95": 0.47,
+  "meter_redraw_ms_avg": 1.05,
+  "theme_switch_ms": 209.4,
+  "lang_switch_ms": 325.5,
+  "idle_cpu_pct": 0.0,
+  "rss_mb": 56.1,
+  "widgets": 72
+}
