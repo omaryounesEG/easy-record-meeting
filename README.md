@@ -241,4 +241,4 @@ MIT for this application. IBM Plex fonts are licensed under the SIL Open Font
 License 1.1 (see `assets/fonts/`). ffmpeg is bundled separately under its own
 license (GPL/LGPL build by gyan.dev).
 
-**Author:** SAIP Consulting — صائب للاستشارات · omaryounesEG
+**Author:** SAIP Consulting —· omaryounesEG
