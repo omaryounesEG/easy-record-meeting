@@ -132,7 +132,7 @@ portable Windows app · Windows 10 · Windows 11 · Arabic UI · bilingual · da
 
 <p align="center">
   <code>EasyRecordMeeting-2.0.2-win64.zip</code> · 100.0 MB<br>
-  SHA-256 <code>efb369389ddc2bd2037892361e832692eda91391b94a68e93b5c2bc24df499c9</code>
+  SHA-256 <code>f388731d787b186ba6cc880d8a7f1232a4bfdaa6d0388ed21eee1e823db6c74b</code>
 </p>
 
 ---
