@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -135,6 +136,44 @@ class TestWatchdog(unittest.TestCase):
         self.assertTrue(rec.snapshot().notice)
         device.release.set()          # unblock the abandoned reader so it can exit
 
+    def test_wedged_audio_does_not_freeze_the_level(self):
+        """Reported bug: no alarm ever fired because the level kept its last value."""
+        device = WedgedDevice()
+        self.rec = rec = engine.Recorder()
+        rec.start(mode="audio", directory=self.dir, device=device)
+        rec.warn_after = 0.6
+        rec.critical_after = 1.0
+
+        deadline = time.monotonic() + 8.0
+        snap = rec.snapshot()
+        while time.monotonic() < deadline and snap.alert == "none":
+            time.sleep(0.1)
+            snap = rec.snapshot()
+
+        self.assertEqual(snap.level, 0.0, "a dead stream must not keep showing the old level")
+        self.assertIn(snap.alert, ("warn", "critical"),
+                      "the silence alarm never fired on a dead audio stream")
+        device.release.set()
+
+    def test_recovery_follows_the_system_default_speaker(self):
+        """When the recorded endpoint disappears, the default speaker's loopback is used."""
+        dead_name = "Speakers (7- Logi USB Headset H340)"
+        live = mock.Mock()
+        live.name = "Speakers (2- Realtek High Definition Audio)"
+        live.isloopback = True
+        stub = mock.Mock()
+        stub.all_microphones.return_value = [live]
+        speaker = mock.Mock()
+        speaker.name = "Speakers (2- Realtek High Definition Audio)"
+        stub.default_speaker.return_value = speaker
+
+        self.rec = rec = engine.Recorder()
+        rec._device_name = dead_name
+        with mock.patch.dict(sys.modules, {"soundcard": stub}):
+            found, why = rec._recover_device()
+        self.assertIs(found, live)
+        self.assertEqual(why, "system default speaker")
+
     def test_dead_ffmpeg_rolls_a_new_segment(self):
         """If ffmpeg dies mid-call the screen capture must resume, not silently stop."""
         self.rec = rec = engine.Recorder()
@@ -147,6 +186,31 @@ class TestWatchdog(unittest.TestCase):
 
         self.assertGreaterEqual(len(rec._segments), 2, "a dead ffmpeg was not restarted")
         self.assertEqual(rec.snapshot().status, "recording")
+
+    def test_locked_screen_keeps_the_audio(self):
+        """gdigrab fails on a locked desktop: the recording must keep the sound."""
+        self.rec = rec = engine.Recorder()
+
+        def boom(self, target, progress=None):
+            raise engine.RecorderError("[gdigrab] Failed to capture image (error 5)")
+
+        with mock.patch.object(engine.Recorder, "_spawn_video", boom):
+            rec.start(mode="video", directory=self.dir, device=ToneDevice())
+            time.sleep(2.2)
+            snap = rec.snapshot()
+            self.assertEqual(snap.status, "recording",
+                             "a failed screen capture must not abort the recording")
+            result = rec.stop()
+
+        self.assertIn(result.status, ("done", "error"))
+        self.assertTrue(result.output_path and os.path.exists(result.output_path),
+                        "no file was produced")
+        self.assertGreater(os.path.getsize(result.output_path), 4096)
+
+        # the produced file must actually contain sound
+        probe = subprocess.run([engine.resolve_ffmpeg(), "-hide_banner", "-i", result.output_path],
+                               capture_output=True, text=True, errors="ignore")
+        self.assertIn("Audio:", probe.stderr, "the audio track was lost")
 
     def test_reconnect_matches_the_endpoint_fuzzily(self):
         """Ported from NEW: the endpoint name gains a changing index prefix."""

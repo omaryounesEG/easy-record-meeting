@@ -39,6 +39,9 @@ AUDIO_STALL_SECONDS = 12.0                # device silence (after real sound) ->
 AUDIO_RECOVERIES = 3                      # stream restarts allowed per segment
 AUDIO_HARD_STALL = 20.0                   # no audio chunks at all -> roll a new segment
 VIDEO_HARD_STALL = 12.0                   # ffmpeg silent -> roll a new segment
+VIDEO_RETRY_SECONDS = 10.0                # wait before retrying a failed capture
+AUDIO_ROLL_BYTES = int(3.5 * 1024 ** 3)   # a WAV must stay well under 4 GB
+AUDIO_PROBE_SECONDS = 0.4                 # quick level probe when picking a fallback
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -199,8 +202,14 @@ class Recorder:
         self._notice_at = 0.0
         self._device_name = ""
         self._audio_beat = 0.0            # last moment a chunk arrived
+        self._chunks = 0                  # audio chunks written this segment
+        self._segment_started = 0.0
+        self._log_path: Optional[str] = None
+        self._lost_rolls = 0              # consecutive segments rolled without audio
         self._audio_token = None          # only the owner writes to the segment
         self._video_progress = None
+        self._video_size = (1920, 1080)
+        self._video_down_until = 0.0
         self._wd_stop = threading.Event()
         self._wd_thread: Optional[threading.Thread] = None
         self._video: Optional[subprocess.Popen] = None
@@ -245,7 +254,9 @@ class Recorder:
                 status=self._status,
                 mode=self._mode,
                 elapsed=elapsed,
-                level=self._level if self._status == "recording" else 0.0,
+                level=(self._level
+                       if self._status == "recording"
+                       and time.monotonic() - self._audio_beat < 1.5 else 0.0),
                 silence=silence,
                 alert=alert,
                 alarm_muted=self._alarm_muted,
@@ -306,6 +317,7 @@ class Recorder:
             self._period_start = time.monotonic()
             self._last_sound = time.monotonic()
             self._silence = 0.0
+            self._audio_beat = time.monotonic()
             self._segments = []
             self._segment_count = 0
             self._had_sound = False
@@ -318,13 +330,49 @@ class Recorder:
         try:
             self._begin_segment(device)
         except Exception as exc:
-            with self._lock:
-                self._status = "error"
-                self._error = str(exc)
-            self._cleanup_segments()
-            raise RecorderError(str(exc)) from exc
+            # the user asked for video, but losing the meeting would be worse:
+            # start the sound and keep retrying the picture
+            if self._mode == "video":
+                self._log(f"initial screen capture failed: {exc}")
+                try:
+                    self._begin_segment(device, with_video=False)
+                    self._video_down_until = time.monotonic() + VIDEO_RETRY_SECONDS
+                    self._note("screen capture is unavailable — audio keeps recording",
+                               "notice.video_lost")
+                except Exception as exc2:
+                    with self._lock:
+                        self._status = "error"
+                        self._error = str(exc2)
+                    self._cleanup_segments()
+                    raise RecorderError(str(exc2)) from exc2
+            else:
+                with self._lock:
+                    self._status = "error"
+                    self._error = str(exc)
+                self._cleanup_segments()
+                raise RecorderError(str(exc)) from exc
         self._start_watchdog()
+        self._log(f"start mode={self._mode} device={self._device_name!r} out={self._output}")
         return self._output
+
+    # ------------------------------------------------------------------ logging
+    def _log(self, message: str) -> None:
+        """Append one line to %APPDATA%/EasyRecord/recorder.log (best effort)."""
+        try:
+            if not self._log_path:
+                import tempfile
+                from .config import config_path
+                base = os.path.dirname(config_path())
+                os.makedirs(base, exist_ok=True)
+                self._log_path = os.path.join(base, "recorder.log")
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            line = f"{stamp} {message}\n"
+            if os.path.exists(self._log_path) and os.path.getsize(self._log_path) > 2_000_000:
+                os.replace(self._log_path, self._log_path + ".1")
+            with open(self._log_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- watchdog
     def _start_watchdog(self) -> None:
@@ -368,17 +416,36 @@ class Recorder:
         by itself: the only safe move is to start a new segment and let the mux
         step join the parts.  The same applies to a dead ffmpeg process.
         """
+        last_log = time.monotonic()
         while not stop.wait(1.0):
             try:
                 if self._status != "recording":
                     continue
                 now = time.monotonic()
-                age = now - self._audio_beat
-                if self._audio_beat and age > AUDIO_HARD_STALL:
+                if now - last_log >= 30.0:          # one line every 30 s
+                    last_log = now
+                    self._log(f"alive level={self._level:.0f} chunks={self._chunks} "
+                              f"segment={len(self._segments)} audio_age={now - self._audio_beat:.1f}s "
+                              f"video_ok={self._video_alive() if self._mode == 'video' else 'n/a'}")
+                age = now - max(self._audio_beat, self._segment_started)
+                if age > AUDIO_HARD_STALL:
                     self._roll_segment(f"audio stream stalled for {age:.0f}s — continuing")
                     continue
-                if self._mode == "video" and not self._video_alive():
-                    self._roll_segment("screen capture stopped — continuing")
+                if self._segments:
+                    current = self._segments[-1]["audio"]
+                    try:
+                        if os.path.getsize(current) > AUDIO_ROLL_BYTES:
+                            self._roll_segment("audio file reached 3.5 GB")
+                            continue
+                    except OSError:
+                        pass
+                if self._mode == "video":
+                    if self._video is None:
+                        if now >= self._video_down_until:
+                            self._roll_segment("resuming the screen capture")
+                        continue
+                    if not self._video_alive():
+                        self._roll_segment("screen capture stopped — continuing")
             except Exception:
                 continue
 
@@ -387,19 +454,38 @@ class Recorder:
         with self._lock:
             if self._status != "recording":
                 return
-            key = "notice.video_reconnect" if "screen" in reason else "notice.audio_reconnect"
+            if self._chunks == 0:
+                self._lost_rolls += 1
+            else:
+                self._lost_rolls = 0
+            if "screen" in reason:
+                key = "notice.video_reconnect"
+            elif self._lost_rolls >= 2:
+                key = "notice.audio_lost"
+            else:
+                key = "notice.audio_reconnect"
+            self._log(f"roll segment ({key}): {reason}")
             self._note(reason, key)
         self._end_segment(soft=True)
         device = self._fresh_device() or self._last_device
         try:
             self._begin_segment(device)
+            return
+        except Exception as exc:                       # screen capture failed
+            self._log(f"video restart failed: {exc}")
+        try:                                          # keep the sound at least
+            self._begin_segment(device, with_video=False)
+            self._video_down_until = time.monotonic() + VIDEO_RETRY_SECONDS
+            self._note("screen capture is unavailable — audio keeps recording",
+                       "notice.video_lost")
+            return
         except Exception as exc:
             with self._lock:
                 self._status = "error"
                 self._error = f"could not restart the recording stream: {exc}"
 
     # --------------------------------------------------------------- segments
-    def _begin_segment(self, device) -> None:
+    def _begin_segment(self, device, with_video: bool = True) -> None:
         index = len(self._segments)
         directory = os.path.dirname(self._output)
         segment = {
@@ -407,14 +493,15 @@ class Recorder:
             "audio": os.path.join(directory, f".{self._base}.{index}.audio.wav"),
             "progress": os.path.join(directory, f".{self._base}.{index}.progress"),
         }
-        if self._mode == "video":
+        if self._mode == "video" and with_video:
             self._spawn_video(segment["video"], segment["progress"])
         self._video_progress = segment["progress"]
         self._video_target = segment["video"]
         self._segments.append(segment)
         self._seg_stop = threading.Event()
         self._audio_token = object()
-        self._audio_beat = time.monotonic()
+        self._segment_started = time.monotonic()
+        self._chunks = 0
         self._thread = threading.Thread(
             target=self._write_loop,
             args=(device, self._mode, segment, self._seg_stop, self._audio_token),
@@ -447,6 +534,7 @@ class Recorder:
             width, height = 1920, 1080
         if width <= 0 or height <= 0:
             width, height = 1920, 1080
+        self._video_size = (width, height)
 
         init_com()
         log_path = target + ".log"
@@ -477,6 +565,36 @@ class Recorder:
         if self._video.poll() is not None:
             raise RecorderError(self._ffmpeg_error() or "screen capture could not start")
 
+    def _mux_audio_only(self, audio: str, part: str) -> bool:
+        """Screen capture failed: keep the sound on a black picture.
+
+        A silent-video part is still a valid MP4 with the same stream layout as
+        the others, so the concat step keeps one continuous file.
+        """
+        width, height = self._video_size
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r=15",
+               "-i", audio, "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+               "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", "-b:a", "160k",
+               part]
+        try:
+            done = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                  creationflags=CREATE_NO_WINDOW, timeout=3600)
+        except Exception as exc:
+            self._log(f"audio-only mux failed: {exc}")
+            return False
+        if done.returncode != 0 or not os.path.exists(part) or os.path.getsize(part) < 1024:
+            self._log(f"audio-only mux exited {done.returncode}: "
+                      f"{(done.stderr or b'')[-300:].decode('utf-8', 'replace')}")
+            return False
+        self._log("segment had no picture: the audio was kept on a black frame")
+        with self._lock:
+            self._notice = "the screen could not be captured — the audio was kept"
+            self._notice_key = "notice.audio_kept"
+            self._notice_at = time.monotonic()
+        return True
+
     def _ffmpeg_error(self) -> str:
         try:
             if self._video_log and os.path.exists(self._video_log):
@@ -498,38 +616,61 @@ class Recorder:
         except Exception as exc:
             with self._lock:
                 if self._status in ("recording", "paused"):
+                    if self._status == "recording":
+                        self._accumulated += time.monotonic() - self._period_start
                     self._error = f"audio device error: {exc}"
                     self._status = "error"
             # never keep capturing a silent picture: the user asked for sound
             self._kill_video()
             stop.set()
 
-    def _reconnect_device(self):
-        """Find the same loopback endpoint again after a device glitch.
+    def _recover_device(self):
+        """Pick a loopback endpoint that can actually deliver sound.
 
-        Ported from the NEW build: soundcard exposes loopback endpoints as
-        microphones, and the endpoint name carries a changing index prefix
-        ("Speakers (2- ...)"), so a fuzzy, loopback-only match is used.
+        Order: the same endpoint (index-insensitive name) -> the system default
+        speaker's loopback (the common case when a USB headset disconnects) ->
+        the first endpoint that returns a real signal.
         """
         name = self._device_name or ""
         try:
             import soundcard as sc
 
-            candidates = [m for m in sc.all_microphones(include_loopback=True)
-                          if getattr(m, "isloopback", False)]
-        except Exception:
-            return None
-        if not candidates:
-            return None
+            mics = [m for m in sc.all_microphones(include_loopback=True)
+                    if getattr(m, "isloopback", False)]
+        except Exception as exc:
+            self._log(f"recover: enumeration failed: {exc}")
+            return None, "enumeration failed"
+        if not mics:
+            self._log("recover: no loopback endpoints")
+            return None, "no loopback endpoints"
+
         key = device_key(name)
-        for mic in candidates:                     # exact (index ignored)
+        for mic in mics:
             if device_key(getattr(mic, "name", "")) == key:
-                return mic
-        for mic in candidates:                     # one name contains the other
+                return mic, "same endpoint"
+        for mic in mics:
             mic_key = device_key(getattr(mic, "name", ""))
             if key and (key in mic_key or mic_key in key):
-                return mic
-        return None
+                return mic, "name contains"
+        try:
+            speaker = sc.default_speaker()
+            speaker_key = device_key(getattr(speaker, "name", ""))
+            for mic in mics:
+                if device_key(getattr(mic, "name", "")) == speaker_key:
+                    return mic, "system default speaker"
+        except Exception:
+            pass
+        for mic in mics[:4]:
+            try:
+                if self.probe_level(mic, AUDIO_PROBE_SECONDS) >= 1.0:
+                    return mic, "probe: it has sound"
+            except Exception:
+                continue
+        return mics[0], "first available"
+
+    def _reconnect_device(self):
+        """Backwards-compatible wrapper returning just the device."""
+        return self._recover_device()[0]
 
     def _pump_audio(self, device, on_chunk, stop: threading.Event, token=None) -> None:
         """Read the loopback stream, restarting it when the endpoint goes dead.
@@ -558,6 +699,7 @@ class Recorder:
                         if token is not None and self._audio_token is not token:
                             return              # segment was closed under us
                         self._audio_beat = time.monotonic()
+                        self._chunks += 1
                         on_chunk(data)
                         level = self._track_level(data, np)
                         if level >= 1.0:
@@ -582,7 +724,9 @@ class Recorder:
                     raise RecorderError(
                         f"the audio device stopped responding ({exc})") from exc
                 self._note(f"reconnecting the audio stream ({attempts}/{AUDIO_RECOVERIES})")
-                replacement = self._reconnect_device()
+                replacement, why = self._recover_device()
+                self._log(f"reconnect attempt {attempts}: {type(exc).__name__}: {exc} "
+                          f"-> {why} ({getattr(replacement, 'name', 'none')})")
                 if replacement is not None:
                     device = replacement
                 stop.wait(0.6)
@@ -715,7 +859,11 @@ class Recorder:
                 self._status = "done"
             elif failed and os.path.exists(self._output or ""):
                 self._error = (self._error or "recording failed") + " — the captured part was kept"
-            return self.snapshot()
+            snap = self.snapshot()
+        self._log(f"stop status={snap.status} elapsed={snap.elapsed:.0f}s "
+                  f"segments={snap.segments} size={snap.file_size} "
+                  f"notice={snap.notice!r} error={snap.error!r}")
+        return snap
 
     def _finalize_audio(self) -> None:
         path = self._output
@@ -776,6 +924,8 @@ class Recorder:
         video_ok = os.path.exists(video) and os.path.getsize(video) > 1024
         audio_ok = os.path.exists(audio) and os.path.getsize(audio) > 1024
         if not video_ok:
+            if audio_ok:                       # never throw the sound away
+                return self._mux_audio_only(audio, part)
             with self._lock:
                 self._error = (f"video segment missing ({os.path.basename(video)}, "
                                f"{os.path.getsize(video) if os.path.exists(video) else 'absent'} bytes)")

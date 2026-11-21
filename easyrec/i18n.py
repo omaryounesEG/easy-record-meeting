@@ -114,6 +114,18 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "ar": "إعادة تشغيل تصوير الشاشة… التسجيل مستمر",
         "en": "Restarting the screen capture… recording continues",
     },
+    "notice.audio_lost": {
+        "ar": "الصوت متوقف — جارٍ إعادة المحاولة",
+        "en": "Audio is down — retrying",
+    },
+    "notice.video_lost": {
+        "ar": "تعذّر تصوير الشاشة — الصوت يُسجَّل",
+        "en": "Screen capture unavailable — audio keeps recording",
+    },
+    "notice.audio_kept": {
+        "ar": "تعذّر تصوير الشاشة — حُفظ الصوت",
+        "en": "The screen could not be captured — the audio was kept",
+    },
     "notice.no_audio": {
         "ar": "حُفظ مقطع بدون صوت — الصورة محفوظة",
         "en": "A segment was saved without sound — the picture is kept",

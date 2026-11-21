@@ -76,6 +76,7 @@
 | الملف صامت | راقب مؤشر الإشارة أول 10 ثوانٍ من أي اجتماع |
 | فيديو لا يبدأ | قد تكون دقة الشاشة تغيّرت أثناء التسجيل؛ أعد التشغيل |
 | القص يفشل | تأكد أن البداية < النهاية وأن النهاية ≤ مدة الملف |
+| الصوت ينقطع في تسجيل طويل | البرنامج يعيد التوصيل تلقائيًا وينبّهك. للمساعدة في التشخيص أرسل ملف السجل:<br>`%APPDATA%\EasyRecord\recorder.log` |
 
 ---
 
@@ -143,3 +144,4 @@ notes, and opens the releases page. Download the new portable build manually.
 | File is silent | Watch the level meter for the first 10 seconds |
 | Video will not start | Screen resolution may have changed mid-session; restart the app |
 | Trim fails | Ensure start < end and end ≤ full length |
+| Audio drops in a long session | The app reconnects automatically and alerts you. For diagnosis send `%APPDATA%\EasyRecord\recorder.log` |

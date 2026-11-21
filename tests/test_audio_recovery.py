@@ -78,6 +78,9 @@ class TestAudioRecovery(unittest.TestCase):
         self._stall = engine.AUDIO_STALL_SECONDS
         self._list = engine.list_devices
         engine.list_devices = lambda: []          # never touch the real hardware
+        # the endpoint chooser has its own tests; here the fake device is reused
+        self._recover = engine.Recorder._recover_device
+        engine.Recorder._recover_device = lambda self: (self._last_device, "same endpoint")
         engine.CHUNK_FRAMES = CHUNK
         engine.AUDIO_STALL_SECONDS = 0.05          # 5 silent chunks
         self.dir = temp_dir("recover_")
@@ -86,6 +89,7 @@ class TestAudioRecovery(unittest.TestCase):
         engine.CHUNK_FRAMES = self._chunk
         engine.AUDIO_STALL_SECONDS = self._stall
         engine.list_devices = self._list
+        engine.Recorder._recover_device = self._recover
         if getattr(self, "rec", None) is not None:
             try:
                 self.rec.stop()

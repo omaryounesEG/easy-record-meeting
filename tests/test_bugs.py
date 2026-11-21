@@ -96,8 +96,12 @@ class TestRecorderLifecycle(unittest.TestCase):
         self.dir = temp_dir("easyrec_engine_")
         self.device = FakeDevice()
         self.recorder = engine.Recorder(ffmpeg=engine.resolve_ffmpeg())
+        # keep the endpoint chooser out of these unit tests (it has its own)
+        self._recover = engine.Recorder._recover_device
+        engine.Recorder._recover_device = lambda self: (self._last_device, "same endpoint")
 
     def tearDown(self):
+        engine.Recorder._recover_device = self._recover
         for name in os.listdir(self.dir):
             try:
                 os.remove(os.path.join(self.dir, name))
